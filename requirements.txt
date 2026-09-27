@@ -1,0 +1,6 @@
+requests
+requests-oauthlib
+Pillow
+boto3
+pynacl
+edge-tts
