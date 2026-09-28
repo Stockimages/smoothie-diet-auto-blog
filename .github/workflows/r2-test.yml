@@ -1,0 +1,71 @@
+name: R2 Test
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install boto3
+        run: pip install boto3
+
+      - name: Test R2 connection
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          python - <<'EOF'
+          import os
+          import boto3
+          from botocore.config import Config
+
+          print("boto3 version:", boto3.__version__)
+
+          def info(name):
+              v = os.environ.get(name, "")
+              print(f"{name}: length={len(v)}, space_or_newline_at_edges={v != v.strip()}, space_inside={any(c.isspace() for c in v)}")
+              return v
+
+          acct = info("R2_ACCOUNT_ID")
+          key = info("R2_ACCESS_KEY_ID")
+          secret = info("R2_SECRET_ACCESS_KEY")
+          bucket = info("R2_BUCKET_NAME")
+          print("Expected lengths -> account id: 32, access key id: 32, secret: 64, bucket: 19")
+          # GitHub hides exact secret values in logs, so print them spaced out to compare by eye
+          print("account id chars :", " ".join(acct))
+          print("bucket chars     :", " ".join(bucket))
+          print("access key id    :", key[:4], "...", key[-4:])
+
+          def attempt(label, cfg):
+              s3 = boto3.client(
+                  "s3",
+                  endpoint_url=f"https://{acct}.r2.cloudflarestorage.com",
+                  aws_access_key_id=key,
+                  aws_secret_access_key=secret,
+                  config=cfg,
+                  region_name="auto",
+              )
+              try:
+                  s3.put_object(Bucket=bucket, Key="test/r2-test.txt", Body=b"hello", ContentType="text/plain")
+                  print(f"[{label}] PUT OK")
+                  s3.delete_object(Bucket=bucket, Key="test/r2-test.txt")
+              except Exception as e:
+                  resp = getattr(e, "response", {})
+                  print(f"[{label}] FAILED:", resp.get("Error"), "HTTP", resp.get("ResponseMetadata", {}).get("HTTPStatusCode"))
+
+          attempt("default", Config(signature_version="s3v4"))
+          try:
+              attempt(
+                  "checksum-when-required",
+                  Config(
+                      signature_version="s3v4",
+                      request_checksum_calculation="when_required",
+                      response_checksum_validation="when_required",
+                  ),
+              )
+          except Exception as e:
+              print("checksum option not supported by this boto3:", e)
+          EOF
