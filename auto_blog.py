@@ -27,6 +27,7 @@ import json
 import base64
 import subprocess
 import textwrap
+from html import escape as html_escape
 import random
 import time
 import asyncio
@@ -36,7 +37,6 @@ from io import BytesIO
 from datetime import datetime, timezone
 
 import requests
-from requests_oauthlib import OAuth1Session
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 
@@ -55,13 +55,13 @@ SITE_URL = os.environ.get("SITE_URL", "https://thesmoothiedietdaily.blogspot.com
 PINTEREST_APP_ID = os.environ["PINTEREST_APP_ID"]
 PINTEREST_APP_SECRET = os.environ["PINTEREST_APP_SECRET"]
 PINTEREST_REFRESH_TOKEN = os.environ["PINTEREST_REFRESH_TOKEN"]
-PINTEREST_BOARD_ID = os.environ["PINTEREST_BOARD_ID"]
+# Optional fallback only: boards are now created/found automatically by name (see PINTEREST_BOARDS).
+PINTEREST_BOARD_ID = os.environ.get("PINTEREST_BOARD_ID", "")
 
-TUMBLR_CONSUMER_KEY = os.environ["TUMBLR_CONSUMER_KEY"]
-TUMBLR_CONSUMER_SECRET = os.environ["TUMBLR_CONSUMER_SECRET"]
-TUMBLR_ACCESS_TOKEN = os.environ["TUMBLR_OAUTH_TOKEN"]
-TUMBLR_ACCESS_TOKEN_SECRET = os.environ["TUMBLR_OAUTH_TOKEN_SECRET"]
-TUMBLR_BLOG_NAME = os.environ["TUMBLR_BLOG_IDENTIFIER"]
+FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID", "")
+FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN", "")
+INSTAGRAM_ACCOUNT_ID = os.environ.get("INSTAGRAM_ACCOUNT_ID", "")
+INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN", "")
 
 AFFILIATE_LINK = os.environ["AFFILIATE_LINK"]
 
@@ -105,6 +105,40 @@ BANNED_PHRASES = [
     "guaranteed", "cure", "treat", "melts fat", "lose weight fast",
     "in just days", "miracle",
 ]
+
+# Pinterest boards. The script finds each board by name and creates it (Public) if it
+# doesn't exist yet, so no manual board setup or board-ID secrets are ever needed.
+PINTEREST_BOARDS = {
+    "breakfast": {
+        "name": "Breakfast Smoothie Recipes",
+        "description": "Quick, easy breakfast smoothie recipes for busy mornings. Simple ingredients, real flavor.",
+    },
+    "green": {
+        "name": "Green Smoothie Recipes",
+        "description": "Fresh green smoothie recipes with spinach, kale, cucumber and fruit. Easy, refreshing and beginner friendly.",
+    },
+    "fruit": {
+        "name": "Fruit & Berry Smoothies",
+        "description": "Creamy fruit and berry smoothie recipes: strawberry, banana, mango, blueberry and more.",
+    },
+    "protein": {
+        "name": "Protein & Post-Workout Smoothies",
+        "description": "Protein-packed smoothie ideas for after your workout or a filling snack.",
+    },
+    "lowcal": {
+        "name": "Light & Low-Calorie Smoothies",
+        "description": "Light, refreshing smoothie ideas with simple ingredients for a balanced everyday routine.",
+    },
+    "wellness": {
+        "name": "Everyday Wellness Smoothies",
+        "description": "Smoothies for steady energy and everyday balance. Simple recipes with real ingredients.",
+    },
+    "tips": {
+        "name": "Smoothie Diet & Wellness Tips",
+        "description": "Honest guides, reviews and tips about smoothie diets and healthy daily routines.",
+    },
+}
+RECIPE_BOARD_KEYS = ["breakfast", "green", "fruit", "protein", "lowcal", "wellness"]
 
 CONTENT_MIX = {"recipe": 0.6, "review": 0.4}
 
@@ -245,7 +279,8 @@ def generate_draft(history, article_type):
         extra_schema_fields = """
   "ingredients": [{"item": "string", "amount": "string"}],
   "calories": "approx per serving, e.g. '180 kcal'",
-  "prep_time": "e.g. '5 min'","""
+  "prep_time": "e.g. '5 min'",
+  "board_key": "which Pinterest board fits best, exactly one of: breakfast, green, fruit, protein, lowcal, wellness","""
     else:
         topic_instruction = (
             "Write a review, comparison, or 'does it actually work' style article about "
@@ -259,7 +294,7 @@ def generate_draft(history, article_type):
   "pros": ["string", "string", "string"],
   "cons": ["string", "string"],"""
 
-    prompt = f"""You are a real person who writes for a smoothie/wellness blog that also
+    prompt = f"""You are an experienced wellness content writer for a smoothie blog that also
 promotes an affiliate 21-day smoothie weight-management program. Every reader
 could be someone with a real, sometimes difficult relationship with their body
 and food — write with warmth, respect, and zero judgment.
@@ -273,11 +308,16 @@ STRICT CONTENT RULES (never break these):
 2. NEVER use guarantee/cure/treat language.
 3. NEVER reference or imply a specific body type, "ideal" body, or before/after
    transformation photos.
-4. Every article must include this exact affiliate disclosure sentence
-   somewhere natural near the top: "{AFFILIATE_DISCLOSURE}"
+4. Do NOT write any affiliate disclosure sentence yourself -- it is added
+   automatically at the top of the post. Never mention "affiliate links" or
+   commissions inside the article text.
 5. NEVER use these overused/risky words or phrases, in any form: {banned_list}.
-6. Write like a real person talking to a friend — vary sentence length, use
-   contractions, be specific and concrete. No generic filler.
+6. Write in a warm, helpful, conversational editorial voice — vary sentence
+   length, use contractions, be specific and concrete. No generic filler.
+7. NEVER invent personal stories or experiences ("I tried", "my stomach", "I
+   developed this recipe"), reader testimonials, quotes, or made-up statistics.
+   Do not claim the author personally used any product or program. Speak
+   to the reader ("you") and stay factual.
 
 Topics already covered (do NOT repeat these or anything too similar):
 {json.dumps(recent_titles, ensure_ascii=False)}
@@ -288,9 +328,24 @@ CRITICAL JSON-SAFETY RULE: inside the "html" string, use SINGLE quotes for
 every HTML attribute value. Never use a double-quote character inside the
 html string.
 
-STRUCTURE (HTML using ONLY p, h2, h3, ul, ol, li, strong tags):
+ARTICLE FLOW (follow this order):
+1. CURIOSITY HOOK: the opening paragraph makes the reader want to keep reading
+   with an honest, specific question or surprising-but-true observation (example
+   style: "Why does a morning smoothie sometimes leave you hungry by 10am?").
+   Never a miracle promise, never clickbait.
+2. PROBLEM: name a relatable EVERYDAY problem (low energy, busy mornings, sugar
+   cravings, boring meals, not knowing what to make). NEVER frame medical
+   conditions (IBS, diabetes, thyroid, PCOS, digestive disorders, etc.) as
+   problems this article can solve.
+3. SOLUTION: the recipe (recipe articles) or the honest review (review articles).
+4. The soft call to action is added automatically at the end -- do not add
+   sales language of your own.
+
+STRUCTURE (HTML using ONLY p, h3, ul, ol, li, strong tags inside "html"):
 1. Opening hook paragraph (this is what Pinterest/Google show as preview).
-2. A few h2/h3 sections.
+2. A few sections. Each section's "heading" field is added automatically as
+   the section title, so the "html" string must NOT repeat that heading -- start
+   it directly with a paragraph or list.
 3. IMAGE PLACEHOLDERS: after the intro and after 1-2 major sections, insert
    on its own line: [[IMG_1]], then [[IMG_2]] — 1-2 total, sequential.
 
@@ -305,6 +360,9 @@ Also write:
   program — same gentle tone for both recipe and review articles, still
   following all the content rules above.
 - "key_benefit": one-line FDA-safe benefit claim.
+- "faqs": exactly 3 short question-and-answer pairs a reader might search for
+  (everyday questions only, e.g. "Can I make this ahead of time?"). Each answer
+  is 1-3 plain sentences. NO medical advice, NO numeric health/weight claims.
 - "reel_script": 45-65 word spoken-word voiceover script for a ~20 second
   vertical video. Punchy hook first sentence. NO call-to-action/link/bio
   line in it (that's added separately as a closing slide).
@@ -319,6 +377,7 @@ Return ONLY valid JSON matching exactly this schema (no markdown fences):
   "pin_hook": "string",
   "cta_text": "string",
   "key_benefit": "string",
+  "faqs": [{{"q": "string", "a": "string"}}],
   "reel_script": "string",
   "hashtag_tags": ["string", "string"]
 }}"""
@@ -373,13 +432,22 @@ def normalize_draft(draft, article_type):
         ]
     if not isinstance(draft.get("hashtag_tags"), list):
         draft["hashtag_tags"] = ["smoothie", "wellness"]
+    faqs = draft.get("faqs")
+    draft["faqs"] = [
+        {"q": str(f["q"]).strip(), "a": str(f["a"]).strip()}
+        for f in (faqs if isinstance(faqs, list) else [])
+        if isinstance(f, dict) and f.get("q") and f.get("a")
+    ][:4]
 
     if article_type == "recipe":
         if not isinstance(draft.get("ingredients"), list):
             draft["ingredients"] = []
         draft.setdefault("calories", "See recipe for details")
         draft.setdefault("prep_time", "5-10 min")
+        if draft.get("board_key") not in RECIPE_BOARD_KEYS:
+            draft["board_key"] = "wellness"
     else:
+        draft["board_key"] = "tips"
         if not isinstance(draft.get("pros"), list):
             draft["pros"] = []
         if not isinstance(draft.get("cons"), list):
@@ -893,30 +961,116 @@ def publish_post(access_token, title, html, labels, search_description=None):
     return res.json()
 
 
-def build_post_html(draft, image_urls):
+HEALTH_DISCLAIMER = (
+    "This article is for general information only and is not medical advice. "
+    "Individual results vary. Please talk to your doctor or a registered dietitian "
+    "before starting a new diet or making big changes to how you eat, especially if "
+    "you are pregnant, nursing, have a medical condition, or take medication."
+)
+
+# Blogger labels that match the site's top menu (Smoothie Recipes / Weight Loss Tips)
+MENU_LABELS = {"recipe": "Smoothie Recipes", "review": "Weight Loss Tips"}
+
+
+# Sub-category labels for recipe posts (no "&" so the menu URLs stay simple)
+SUBCATEGORY_LABELS = {
+    "breakfast": "Breakfast Smoothies",
+    "green": "Green Smoothies",
+    "fruit": "Fruit and Berry Smoothies",
+    "protein": "Protein Smoothies",
+    "lowcal": "Low-Calorie Smoothies",
+    "wellness": "Everyday Wellness Smoothies",
+}
+
+
+def build_labels(draft):
+    """Blogger labels = the blog's menu pages. Recipes get the parent label plus their
+    sub-category; reviews get the tips label. (No random extra tags -- they only clutter the site.)"""
+    labels = [MENU_LABELS.get(draft["article_type"], "Smoothie Recipes")]
+    if draft["article_type"] == "recipe":
+        labels.append(SUBCATEGORY_LABELS.get(draft.get("board_key"), SUBCATEGORY_LABELS["wellness"]))
+    return labels
+
+
+def get_related_posts(history, limit=3):
+    """Most recent posts from history.json, skipping any that no longer exist (404/410)."""
+    related = []
+    for h in list(reversed(history))[:10]:
+        url, title = h.get("url"), h.get("title")
+        if not url or not title:
+            continue
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code in (404, 410):
+                continue
+        except requests.exceptions.RequestException:
+            pass  # can't verify -- still fine to link
+        related.append({"title": title, "url": url})
+        if len(related) >= limit:
+            break
+    return related
+
+
+def build_post_html(draft, image_urls, hero_url=None, related=None):
     parts = [f'<p style="font-size:0.9em;color:#666"><em>{AFFILIATE_DISCLOSURE}</em></p>']
 
+    if hero_url:
+        parts.append(
+            f'<p><img src="{hero_url}" alt="{html_escape(draft["title"], quote=True)}" '
+            f'style="width:100%;max-height:480px;object-fit:cover;border-radius:8px;"/></p>'
+        )
+
+    first_section_idx = len(parts)
     for section in draft["sections"]:
         html = section["html"]
+        # Gemini sometimes repeats the section heading or the disclosure inside the html -- strip both
+        heading_pattern = r"<h[1-4][^>]*>\s*" + re.escape(section["heading"].strip()) + r"\s*</h[1-4]>"
+        html = re.sub(heading_pattern, "", html, count=1, flags=re.I)
+        html = re.sub(r"<p>\s*(<em>)?\s*" + re.escape(AFFILIATE_DISCLOSURE) + r"\s*(</em>)?\s*</p>", "", html, flags=re.I)
+        html = html.replace(AFFILIATE_DISCLOSURE, "")
         for img in draft["section_images"]:
             token, url = img["token"], image_urls.get(img["token"])
             if url:
-                html = html.replace(f"[[{token}]]", f'<img src="{url}" alt="{section["heading"]}" style="max-width:100%;"/>')
+                alt = html_escape(section["heading"], quote=True)
+                html = html.replace(f"[[{token}]]", f'<img src="{url}" alt="{alt}" style="max-width:100%;"/>')
         parts.append(f'<h2>{section["heading"]}</h2>{html}')
 
     if draft["article_type"] == "recipe" and draft.get("ingredients"):
         ing_list = "".join(f'<li>{i.get("amount", "")} {i.get("item", "")}</li>' for i in draft["ingredients"])
-        parts.append(f"<h3>Ingredients</h3><ul>{ing_list}</ul>")
         facts = f'<p><strong>Calories:</strong> {draft.get("calories", "")} &nbsp; <strong>Prep time:</strong> {draft.get("prep_time", "")}</p>'
-        parts.insert(1, facts)
+        parts.insert(first_section_idx, facts)
+        # ingredients go right after the opening section (recipe readers look for them first), not at the bottom
+        parts.insert(first_section_idx + 2, f"<h2>Ingredients</h2><ul>{ing_list}</ul>")
 
     if draft["article_type"] == "review":
         pros = "".join(f"<li>{p}</li>" for p in draft.get("pros", []))
         cons = "".join(f"<li>{c}</li>" for c in draft.get("cons", []))
         parts.append(f"<h3>Pros</h3><ul>{pros}</ul><h3>Cons</h3><ul>{cons}</ul>")
 
-    cta_html = f'<p><a href="{AFFILIATE_LINK}" target="_blank" rel="nofollow noopener"><strong>{draft["cta_text"]}</strong></a></p>'
-    parts.append(cta_html)
+    # CTA: sentence + styled button (rel="sponsored" is what Google wants on affiliate links)
+    parts.append(
+        f'<p>{draft["cta_text"]}</p>'
+        f'<p style="text-align:center;margin:24px 0;"><a href="{AFFILIATE_LINK}" target="_blank" '
+        f'rel="sponsored nofollow noopener" style="display:inline-block;background:#e85a8a;color:#ffffff;'
+        f'font-weight:bold;padding:14px 28px;border-radius:30px;text-decoration:none;">'
+        f'See the 21-Day Smoothie Diet Plan &rarr;</a></p>'
+    )
+
+    if draft.get("faqs"):
+        faq_html = "".join(
+            f'<h3>{html_escape(f["q"])}</h3><p>{html_escape(f["a"])}</p>' for f in draft["faqs"]
+        )
+        parts.append(f"<h2>Frequently Asked Questions</h2>{faq_html}")
+
+    if related:
+        items = "".join(f'<li><a href="{r["url"]}">{html_escape(r["title"])}</a></li>' for r in related)
+        parts.append(f"<h2>More Smoothie Ideas</h2><ul>{items}</ul>")
+
+    parts.append(
+        '<div style="margin-top:28px;padding:14px 16px;border:1px solid #ddd;border-radius:8px;'
+        'background:#fafafa;font-size:0.85em;color:#555;">'
+        f"<strong>Health note:</strong> {HEALTH_DISCLAIMER}</div>"
+    )
     return "\n".join(parts)
 
 
@@ -1012,6 +1166,47 @@ def create_pinterest_video_pin(access_token, board_id, title, description, link,
     return pin_res.json()
 
 
+_board_id_cache = {}
+
+
+def get_or_create_board(access_token, board_key):
+    """Return the Pinterest board ID for this category, creating the board (Public) if it doesn't exist."""
+    if board_key in _board_id_cache:
+        return _board_id_cache[board_key]
+    spec = PINTEREST_BOARDS[board_key]
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    bookmark = None
+    while True:
+        params = {"page_size": 100}
+        if bookmark:
+            params["bookmark"] = bookmark
+        res = robust_request("GET", "https://api.pinterest.com/v5/boards", headers=headers, params=params, timeout=30)
+        if not res.ok:
+            raise RuntimeError(f"Could not list Pinterest boards ({res.status_code}): {res.text}")
+        data = res.json()
+        for board in data.get("items", []):
+            if board.get("name", "").strip().lower() == spec["name"].lower():
+                _board_id_cache[board_key] = board["id"]
+                return board["id"]
+        bookmark = data.get("bookmark")
+        if not bookmark:
+            break
+
+    res = robust_request(
+        "POST", "https://api.pinterest.com/v5/boards",
+        headers={**headers, "Content-Type": "application/json"},
+        json={"name": spec["name"], "description": spec["description"], "privacy": "PUBLIC"},
+        timeout=30,
+    )
+    if not res.ok:
+        raise RuntimeError(f"Could not create Pinterest board '{spec['name']}' ({res.status_code}): {res.text}")
+    board_id = res.json()["id"]
+    print(f"Created Pinterest board: {spec['name']}")
+    _board_id_cache[board_key] = board_id
+    return board_id
+
+
 def build_pin_hashtags(labels, max_tags=5):
     tags = []
     for label in labels[:max_tags]:
@@ -1022,32 +1217,113 @@ def build_pin_hashtags(labels, max_tags=5):
 
 
 # ---------------------------------------------------------------------------
-# Tumblr (adapted from DecorVibe: image is referenced by its R2 URL, no
-# multipart upload needed, since the hero image already lives in R2)
+# Facebook + Instagram (reused from DecorVibe's Meta app/patterns)
 # ---------------------------------------------------------------------------
 
-def post_to_tumblr(title, key_benefit, image_url, link, hashtags):
+def check_meta_token_health():
+    """Pre-flight check for the Facebook/Instagram Page token, so an expired
+    token gives one clear message instead of a buried error later."""
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        print("[token health] FACEBOOK_PAGE_ACCESS_TOKEN not set -- Facebook/Instagram will be skipped.")
+        return False
     try:
-        oauth = OAuth1Session(
-            TUMBLR_CONSUMER_KEY, client_secret=TUMBLR_CONSUMER_SECRET,
-            resource_owner_key=TUMBLR_ACCESS_TOKEN, resource_owner_secret=TUMBLR_ACCESS_TOKEN_SECRET,
+        res = requests.get(
+            "https://graph.facebook.com/me",
+            params={"fields": "id,name", "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+            timeout=15,
         )
-        content = [
-            {"type": "image", "media": [{"url": image_url}]},
-            {"type": "text", "text": title, "subtype": "heading1"},
-            {"type": "text", "text": key_benefit},
-            {"type": "text", "text": AFFILIATE_DISCLOSURE},
-            {"type": "link", "url": link, "display_url": link, "title": "Read the Full Post"},
-            {"type": "text", "text": hashtags},
-        ]
-        res = oauth.post(f"https://api.tumblr.com/v2/blog/{TUMBLR_BLOG_NAME}/posts", json={"content": content}, timeout=30)
         if res.ok:
-            print("Posted to Tumblr:", res.json().get("response", {}).get("id"))
+            print(f"[token health] Facebook/Instagram Page token OK ({res.json().get('name')}).")
             return True
-        print(f"Tumblr post failed ({res.status_code}): {res.text}")
+        print(f"[token health] Facebook/Instagram Page token looks INVALID: {res.text}")
         return False
     except Exception as e:  # noqa: BLE001
-        print(f"Tumblr post failed (blog post is still published fine): {e}")
+        print(f"[token health] Could not verify Facebook/Instagram token: {e}")
+        return False
+
+
+def post_to_facebook_page(message, image_url, link):
+    """Posts a native photo to the Facebook Page, then adds the blog link as
+    a follow-up comment. Never raises -- returns True/False."""
+    if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_ACCESS_TOKEN:
+        print("FACEBOOK_PAGE_ID / FACEBOOK_PAGE_ACCESS_TOKEN not set -- skipping Facebook post.")
+        return False
+    try:
+        res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/photos",
+            data={"url": image_url, "caption": message, "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+            timeout=30,
+        )
+        if not res.ok:
+            print(f"Facebook post failed ({res.status_code}): {res.text}")
+            return False
+        post_id = res.json().get("post_id") or res.json().get("id")
+        print("Posted to Facebook:", post_id)
+        try:
+            comment_res = robust_request(
+                "POST", f"https://graph.facebook.com/v26.0/{post_id}/comments",
+                data={"message": link, "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+                timeout=30,
+            )
+            if not comment_res.ok:
+                print(f"Facebook link-comment failed ({comment_res.status_code}): {comment_res.text}")
+        except Exception as e:  # noqa: BLE001
+            print(f"Facebook link-comment failed (post itself is still published fine): {e}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"Facebook post failed (blog post is still published fine): {e}")
+        return False
+
+
+def post_instagram_reel(caption, video_url):
+    """Posts the same reel video built for Pinterest as an Instagram Reel.
+    Polls until Instagram finishes processing before publishing. Never
+    raises -- returns True/False."""
+    if not INSTAGRAM_ACCOUNT_ID or not INSTAGRAM_ACCESS_TOKEN:
+        print("INSTAGRAM_ACCOUNT_ID / INSTAGRAM_ACCESS_TOKEN not set -- skipping Instagram Reel.")
+        return False
+    try:
+        create_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
+            data={"media_type": "REELS", "video_url": video_url, "caption": caption,
+                  "access_token": INSTAGRAM_ACCESS_TOKEN},
+            timeout=60,
+        )
+        if not create_res.ok:
+            print(f"Instagram Reel container failed ({create_res.status_code}): {create_res.text}")
+            return False
+        creation_id = create_res.json()["id"]
+
+        for attempt in range(15):
+            time.sleep(10)
+            status_res = robust_request(
+                "GET", f"https://graph.facebook.com/v26.0/{creation_id}",
+                params={"fields": "status_code", "access_token": INSTAGRAM_ACCESS_TOKEN},
+                timeout=30,
+            )
+            status_code = status_res.json().get("status_code") if status_res.ok else None
+            print(f"Reel processing status (attempt {attempt + 1}/15): {status_code}")
+            if status_code == "FINISHED":
+                break
+            if status_code == "ERROR":
+                print("Instagram Reel processing failed (ERROR status).")
+                return False
+        else:
+            print("Instagram Reel never finished processing in time -- skipping publish.")
+            return False
+
+        publish_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
+            data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
+            timeout=60,
+        )
+        if publish_res.ok:
+            print("Posted Instagram Reel:", publish_res.json().get("id"))
+            return True
+        print(f"Instagram Reel publish failed ({publish_res.status_code}): {publish_res.text}")
+        return False
+    except Exception as e:  # noqa: BLE001
+        print(f"Instagram Reel failed (blog post is still published fine): {e}")
         return False
 
 
@@ -1087,6 +1363,7 @@ def main():
         used_photo_ids.update(h.get("photo_ids", []))
 
     local_paths, image_urls, this_run_photo_ids = [], {}, []
+    temp_r2_paths = []  # only these get deleted from R2 at the end (Blogger keeps embedding the rest)
 
     hero_bytes, hero_id = search_pexels_image(draft["image_prompt"], used_photo_ids=used_photo_ids, target_ratio=9 / 16)
     this_run_photo_ids.append(hero_id)
@@ -1111,8 +1388,8 @@ def main():
     # --- 1. Blogger ---
     print("Publishing to Blogger...")
     access_token = get_access_token()
-    full_html = build_post_html(draft, image_urls)
-    result = publish_post(access_token, draft["title"], full_html, draft.get("hashtag_tags", []),
+    full_html = build_post_html(draft, image_urls, hero_url=hero_url, related=get_related_posts(history))
+    result = publish_post(access_token, draft["title"], full_html, build_labels(draft),
                            search_description=draft.get("key_benefit"))
     post_url = result.get("url")
     print("Published:", post_url)
@@ -1120,6 +1397,7 @@ def main():
     # --- 2. Video (real Pexels footage only, no Ken Burns fallback) + Pinterest ---
     pin_hashtags = build_pin_hashtags(draft.get("hashtag_tags", []), max_tags=5)
     pinterest_ok = False
+    video_url = None
     this_run_video_ids = []
     try:
         used_video_ids = set()
@@ -1159,6 +1437,14 @@ def main():
 
         video_bytes = build_reel_video(reel_image_specs, audio_path, work_dir, width=1080, height=1350)  # 2:3
 
+        # Instagram's Reels API needs a public URL (not raw bytes like Pinterest's upload flow),
+        # so the same video is uploaded to R2 once and reused for both platforms.
+        video_local = "work_video/reel_for_instagram.mp4"
+        with open(video_local, "wb") as f:
+            f.write(video_bytes)
+        video_url = upload_to_r2(video_local)
+        temp_r2_paths.append(video_local)
+
         if article_type == "recipe":
             tagline = "Tasty \u2022 Healthy \u2022 Simple!"
             bullets = [draft.get("calories", ""), f"Ready in {draft.get('prep_time', '')}", "Simple, real ingredients"]
@@ -1176,11 +1462,18 @@ def main():
         with open(infographic_local, "wb") as f:
             f.write(infographic_bytes)
         infographic_cover_url = upload_to_r2(infographic_local)
-        local_paths.append(infographic_local)
+        temp_r2_paths.append(infographic_local)
 
         pinterest_token = get_pinterest_access_token()
+        try:
+            board_id = get_or_create_board(pinterest_token, draft["board_key"])
+        except Exception as board_error:  # noqa: BLE001
+            if not PINTEREST_BOARD_ID:
+                raise
+            print(f"Board lookup/creation failed ({board_error}); using PINTEREST_BOARD_ID fallback.")
+            board_id = PINTEREST_BOARD_ID
         pin_result = create_pinterest_video_pin(
-            pinterest_token, board_id=PINTEREST_BOARD_ID, title=draft["title"],
+            pinterest_token, board_id=board_id, title=draft["title"],
             description=f'{draft["key_benefit"]} {AFFILIATE_DISCLOSURE} {pin_hashtags}',
             link=post_url, video_bytes=video_bytes, cover_image_url=infographic_cover_url,
         )
@@ -1189,13 +1482,16 @@ def main():
     except Exception as e:  # noqa: BLE001
         print(f"Pinterest post failed (blog post is still published fine): {e}")
 
-    # --- 3. Tumblr (every run) ---
-    print("Posting to Tumblr...")
+    # --- 3. Facebook + Instagram (every run) ---
     social_hashtags = build_pin_hashtags(draft.get("hashtag_tags", []), max_tags=10)
-    tumblr_ok = post_to_tumblr(
-        title=draft["title"], key_benefit=draft["key_benefit"],
-        image_url=hero_url, link=post_url, hashtags=social_hashtags,
-    )
+    social_caption = f'{draft["title"]}\n\n{draft["key_benefit"]}\n\n{AFFILIATE_DISCLOSURE}\n{post_url}\n\n{social_hashtags}'
+
+    print("Posting to Facebook...")
+    check_meta_token_health()
+    facebook_ok = post_to_facebook_page(social_caption, hero_url, post_url)
+
+    print("Posting to Instagram...")
+    instagram_ok = post_instagram_reel(social_caption, video_url) if video_url else False
 
     # --- History + cleanup ---
     history.append({
@@ -1206,16 +1502,18 @@ def main():
     save_history(history)
     git_commit_and_push([HISTORY_FILE], f"Auto post history: {draft['title']}")
 
-    for path in local_paths:
-        delete_from_r2(path)  # hero_url intentionally kept -- Blogger embeds it permanently
+    for path in temp_r2_paths:
+        delete_from_r2(path)  # temporary Pinterest cover + Instagram video copy; article images must stay (Blogger embeds them by URL)
 
     def tick(ok):
         return "OK" if ok else "FAILED"
 
     send_phone_notification(
         f"Smoothie Diet Daily posted: {draft['title'][:60]}",
-        f"{draft['title']}\n{post_url}\n\nType: {article_type}\nBlogger: OK\nPinterest: {tick(pinterest_ok)}\nTumblr: {tick(tumblr_ok)}",
+        f"{draft['title']}\n{post_url}\n\nType: {article_type}\nBlogger: OK\nPinterest: {tick(pinterest_ok)}"
+        f"\nFacebook: {tick(facebook_ok)}\nInstagram: {tick(instagram_ok)}",
     )
+
 
 
 if __name__ == "__main__":
