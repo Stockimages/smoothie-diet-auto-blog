@@ -1275,7 +1275,7 @@ def post_to_facebook_page(message, image_url, link):
         return False
 
 
-def post_instagram_reel(caption, video_url):
+def post_instagram_reel(caption, video_url, link):
     """Posts the same reel video built for Pinterest as an Instagram Reel.
     Polls until Instagram finishes processing before publishing. Never
     raises -- returns True/False."""
@@ -1317,11 +1317,23 @@ def post_instagram_reel(caption, video_url):
             data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
             timeout=60,
         )
-        if publish_res.ok:
-            print("Posted Instagram Reel:", publish_res.json().get("id"))
-            return True
-        print(f"Instagram Reel publish failed ({publish_res.status_code}): {publish_res.text}")
-        return False
+        if not publish_res.ok:
+            print(f"Instagram Reel publish failed ({publish_res.status_code}): {publish_res.text}")
+            return False
+        media_id = publish_res.json().get("id")
+        print("Posted Instagram Reel:", media_id)
+
+        try:
+            comment_res = robust_request(
+                "POST", f"https://graph.facebook.com/v26.0/{media_id}/comments",
+                data={"message": link, "access_token": INSTAGRAM_ACCESS_TOKEN},
+                timeout=30,
+            )
+            if not comment_res.ok:
+                print(f"Instagram link-comment failed ({comment_res.status_code}): {comment_res.text}")
+        except Exception as e:  # noqa: BLE001
+            print(f"Instagram link-comment failed (reel is still posted fine): {e}")
+        return True
     except Exception as e:  # noqa: BLE001
         print(f"Instagram Reel failed (blog post is still published fine): {e}")
         return False
@@ -1491,7 +1503,7 @@ def main():
     facebook_ok = post_to_facebook_page(social_caption, hero_url, post_url)
 
     print("Posting to Instagram...")
-    instagram_ok = post_instagram_reel(social_caption, video_url) if video_url else False
+    instagram_ok = post_instagram_reel(social_caption, video_url, post_url) if video_url else False
 
     # --- History + cleanup ---
     history.append({
